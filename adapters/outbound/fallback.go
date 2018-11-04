@@ -14,18 +14,18 @@ type proxy struct {
 }
 
 type Fallback struct {
-	name    string
-	proxies []*proxy
-	rawURL  string
-	delay   time.Duration
-	done    chan struct{}
+	name     string
+	proxies  []*proxy
+	rawURL   string
+	interval time.Duration
+	done     chan struct{}
 }
 
 type FallbackOption struct {
-	Name    string   `proxy:"name"`
-	Proxies []string `proxy:"proxies"`
-	URL     string   `proxy:"url"`
-	Delay   int      `proxy:"delay"`
+	Name     string   `proxy:"name"`
+	Proxies  []string `proxy:"proxies"`
+	URL      string   `proxy:"url"`
+	Interval int      `proxy:"interval"`
 }
 
 func (f *Fallback) Name() string {
@@ -60,7 +60,7 @@ func (f *Fallback) Generator(metadata *C.Metadata) (adapter C.ProxyAdapter, err 
 		}
 		return
 	}
-	return nil, errors.New("There are no valid proxy")
+	return f.proxies[0].RawProxy.Generator(metadata)
 }
 
 func (f *Fallback) Close() {
@@ -68,7 +68,7 @@ func (f *Fallback) Close() {
 }
 
 func (f *Fallback) loop() {
-	tick := time.NewTicker(f.delay)
+	tick := time.NewTicker(f.interval)
 	go f.validTest()
 Loop:
 	for {
@@ -115,7 +115,7 @@ func NewFallback(option FallbackOption, proxies []C.Proxy) (*Fallback, error) {
 		return nil, errors.New("The number of proxies cannot be 0")
 	}
 
-	delay := time.Duration(option.Delay) * time.Second
+	interval := time.Duration(option.Interval) * time.Second
 	warpperProxies := make([]*proxy, len(proxies))
 	for idx := range proxies {
 		warpperProxies[idx] = &proxy{
@@ -125,11 +125,11 @@ func NewFallback(option FallbackOption, proxies []C.Proxy) (*Fallback, error) {
 	}
 
 	Fallback := &Fallback{
-		name:    option.Name,
-		proxies: warpperProxies,
-		rawURL:  option.URL,
-		delay:   delay,
-		done:    make(chan struct{}),
+		name:     option.Name,
+		proxies:  warpperProxies,
+		rawURL:   option.URL,
+		interval: interval,
+		done:     make(chan struct{}),
 	}
 	go Fallback.loop()
 	return Fallback, nil

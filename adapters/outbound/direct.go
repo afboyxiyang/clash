@@ -24,7 +24,7 @@ func (d *DirectAdapter) Conn() net.Conn {
 type Direct struct{}
 
 func (d *Direct) Name() string {
-	return "Direct"
+	return "DIRECT"
 }
 
 func (d *Direct) Type() C.AdapterType {
@@ -32,7 +32,7 @@ func (d *Direct) Type() C.AdapterType {
 }
 
 func (d *Direct) Generator(metadata *C.Metadata) (adapter C.ProxyAdapter, err error) {
-	c, err := net.Dial("tcp", net.JoinHostPort(metadata.String(), metadata.Port))
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(metadata.String(), metadata.Port), tcpTimeout)
 	if err != nil {
 		return
 	}

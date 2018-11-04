@@ -3,25 +3,27 @@ package adapters
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	C "github.com/Dreamacro/clash/constant"
 )
 
 type URLTest struct {
-	name    string
-	proxies []C.Proxy
-	rawURL  string
-	fast    C.Proxy
-	delay   time.Duration
-	done    chan struct{}
+	name     string
+	proxies  []C.Proxy
+	rawURL   string
+	fast     C.Proxy
+	interval time.Duration
+	done     chan struct{}
+	once     int32
 }
 
 type URLTestOption struct {
-	Name    string   `proxy:"name"`
-	Proxies []string `proxy:"proxies"`
-	URL     string   `proxy:"url"`
-	Delay   int      `proxy:"delay"`
+	Name     string   `proxy:"name"`
+	Proxies  []string `proxy:"proxies"`
+	URL      string   `proxy:"url"`
+	Interval int      `proxy:"interval"`
 }
 
 func (u *URLTest) Name() string {
@@ -37,7 +39,11 @@ func (u *URLTest) Now() string {
 }
 
 func (u *URLTest) Generator(metadata *C.Metadata) (adapter C.ProxyAdapter, err error) {
-	return u.fast.Generator(metadata)
+	a, err := u.fast.Generator(metadata)
+	if err != nil {
+		go u.speedTest()
+	}
+	return a, err
 }
 
 func (u *URLTest) Close() {
@@ -45,7 +51,7 @@ func (u *URLTest) Close() {
 }
 
 func (u *URLTest) loop() {
-	tick := time.NewTicker(u.delay)
+	tick := time.NewTicker(u.interval)
 	go u.speedTest()
 Loop:
 	for {
@@ -59,11 +65,16 @@ Loop:
 }
 
 func (u *URLTest) speedTest() {
+	if atomic.AddInt32(&u.once, 1) != 1 {
+		return
+	}
+	defer atomic.StoreInt32(&u.once, 0)
+
 	wg := sync.WaitGroup{}
 	wg.Add(len(u.proxies))
 	c := make(chan interface{})
 	fast := selectFast(c)
-	timer := time.NewTimer(u.delay)
+	timer := time.NewTimer(u.interval)
 
 	for _, p := range u.proxies {
 		go func(p C.Proxy) {
@@ -100,14 +111,15 @@ func NewURLTest(option URLTestOption, proxies []C.Proxy) (*URLTest, error) {
 		return nil, errors.New("The number of proxies cannot be 0")
 	}
 
-	delay := time.Duration(option.Delay) * time.Second
+	interval := time.Duration(option.Interval) * time.Second
 	urlTest := &URLTest{
-		name:    option.Name,
-		proxies: proxies[:],
-		rawURL:  option.URL,
-		fast:    proxies[0],
-		delay:   delay,
-		done:    make(chan struct{}),
+		name:     option.Name,
+		proxies:  proxies[:],
+		rawURL:   option.URL,
+		fast:     proxies[0],
+		interval: interval,
+		done:     make(chan struct{}),
+		once:     0,
 	}
 	go urlTest.loop()
 	return urlTest, nil

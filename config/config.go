@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/adapters/outbound"
+	adapters "github.com/Dreamacro/clash/adapters/outbound"
 	"github.com/Dreamacro/clash/common/observable"
 	"github.com/Dreamacro/clash/common/structure"
 	C "github.com/Dreamacro/clash/constant"
@@ -50,6 +50,7 @@ type RawConfig struct {
 	Mode               string `yaml:"mode"`
 	LogLevel           string `yaml:"log-level"`
 	ExternalController string `yaml:"external-controller"`
+	Secret             string `yaml:"secret"`
 
 	Proxy      []map[string]interface{} `yaml:"Proxy"`
 	ProxyGroup []map[string]interface{} `yaml:"Proxy Group"`
@@ -86,13 +87,18 @@ func (c *Config) Report() chan<- interface{} {
 }
 
 func (c *Config) readConfig() (*RawConfig, error) {
-	if _, err := os.Stat(C.ConfigPath); os.IsNotExist(err) {
+	if _, err := os.Stat(C.Path.Config()); os.IsNotExist(err) {
 		return nil, err
 	}
-	data, err := ioutil.ReadFile(C.ConfigPath)
+	data, err := ioutil.ReadFile(C.Path.Config())
 	if err != nil {
 		return nil, err
 	}
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("Configuration file %s is empty", C.Path.Config())
+	}
+
 	// config with some default value
 	rawConfig := &RawConfig{
 		AllowLan:   false,
@@ -190,6 +196,7 @@ func (c *Config) parseGeneral(cfg *RawConfig) error {
 
 	if restAddr := cfg.ExternalController; restAddr != "" {
 		c.event <- &Event{Type: "external-controller", Payload: restAddr}
+		c.event <- &Event{Type: "secret", Payload: cfg.Secret}
 	}
 
 	c.UpdateGeneral(*c.general)
@@ -243,14 +250,10 @@ func (c *Config) parseProxies(cfg *RawConfig) error {
 	// parse proxy
 	for idx, mapping := range proxiesConfig {
 		proxyType, existType := mapping["type"].(string)
-		proxyName, existName := mapping["name"].(string)
-		if !existType && existName {
-			return fmt.Errorf("Proxy %d missing type or name", idx)
+		if !existType {
+			return fmt.Errorf("Proxy %d missing type", idx)
 		}
 
-		if _, exist := proxies[proxyName]; exist {
-			return fmt.Errorf("Proxy %s is the duplicate name", proxyName)
-		}
 		var proxy C.Proxy
 		var err error
 		switch proxyType {
@@ -278,10 +281,15 @@ func (c *Config) parseProxies(cfg *RawConfig) error {
 		default:
 			return fmt.Errorf("Unsupport proxy type: %s", proxyType)
 		}
+
 		if err != nil {
-			return fmt.Errorf("Proxy %s: %s", proxyName, err.Error())
+			return fmt.Errorf("Proxy [%d]: %s", idx, err.Error())
 		}
-		proxies[proxyName] = proxy
+
+		if _, exist := proxies[proxy.Name()]; exist {
+			return fmt.Errorf("Proxy %s is the duplicate name", proxy.Name())
+		}
+		proxies[proxy.Name()] = proxy
 	}
 
 	// parse proxy group
@@ -305,13 +313,9 @@ func (c *Config) parseProxies(cfg *RawConfig) error {
 				break
 			}
 
-			var ps []C.Proxy
-			for _, name := range urlTestOption.Proxies {
-				p, ok := proxies[name]
-				if !ok {
-					return fmt.Errorf("ProxyGroup %s: proxy or proxy group '%s' not found", groupName, name)
-				}
-				ps = append(ps, p)
+			ps, err := getProxies(proxies, urlTestOption.Proxies)
+			if err != nil {
+				return fmt.Errorf("ProxyGroup %s: %s", groupName, err.Error())
 			}
 			group, err = adapters.NewURLTest(*urlTestOption, ps)
 		case "select":
@@ -320,28 +324,22 @@ func (c *Config) parseProxies(cfg *RawConfig) error {
 			if err != nil {
 				break
 			}
-			selectProxy := make(map[string]C.Proxy)
-			for _, name := range selectorOption.Proxies {
-				proxy, exist := proxies[name]
-				if !exist {
-					return fmt.Errorf("ProxyGroup %s: proxy or proxy group '%s' not found", groupName, name)
-				}
-				selectProxy[name] = proxy
+
+			ps, err := getProxies(proxies, selectorOption.Proxies)
+			if err != nil {
+				return fmt.Errorf("ProxyGroup %s: %s", groupName, err.Error())
 			}
-			group, err = adapters.NewSelector(selectorOption.Name, selectProxy)
+			group, err = adapters.NewSelector(selectorOption.Name, ps)
 		case "fallback":
 			fallbackOption := &adapters.FallbackOption{}
 			err = decoder.Decode(mapping, fallbackOption)
 			if err != nil {
 				break
 			}
-			var ps []C.Proxy
-			for _, name := range fallbackOption.Proxies {
-				p, ok := proxies[name]
-				if !ok {
-					return fmt.Errorf("ProxyGroup %s: proxy or proxy group '%s' not found", groupName, name)
-				}
-				ps = append(ps, p)
+
+			ps, err := getProxies(proxies, fallbackOption.Proxies)
+			if err != nil {
+				return fmt.Errorf("ProxyGroup %s: %s", groupName, err.Error())
 			}
 			group, err = adapters.NewFallback(*fallbackOption, ps)
 		}
@@ -351,7 +349,12 @@ func (c *Config) parseProxies(cfg *RawConfig) error {
 		proxies[groupName] = group
 	}
 
-	proxies["GLOBAL"], _ = adapters.NewSelector("GLOBAL", proxies)
+	var ps []C.Proxy
+	for _, v := range proxies {
+		ps = append(ps, v)
+	}
+
+	proxies["GLOBAL"], _ = adapters.NewSelector("GLOBAL", ps)
 
 	// close old goroutine
 	for _, proxy := range c.proxies {
