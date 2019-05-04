@@ -1,9 +1,12 @@
 package vmess
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +17,14 @@ type websocketConn struct {
 	conn       *websocket.Conn
 	reader     io.Reader
 	remoteAddr net.Addr
+}
+
+type WebsocketConfig struct {
+	Host      string
+	Path      string
+	Headers   map[string]string
+	TLS       bool
+	TLSConfig *tls.Config
 }
 
 // Read implements net.Conn.Read()
@@ -91,9 +102,51 @@ func (wsc *websocketConn) SetWriteDeadline(t time.Time) error {
 	return wsc.conn.SetWriteDeadline(t)
 }
 
-func newWebsocketConn(conn *websocket.Conn, remoteAddr net.Addr) net.Conn {
-	return &websocketConn{
-		conn:       conn,
-		remoteAddr: remoteAddr,
+func NewWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
+	dialer := &websocket.Dialer{
+		NetDial: func(network, addr string) (net.Conn, error) {
+			return conn, nil
+		},
+		ReadBufferSize:   4 * 1024,
+		WriteBufferSize:  4 * 1024,
+		HandshakeTimeout: time.Second * 8,
 	}
+
+	scheme := "ws"
+	if c.TLS {
+		scheme = "wss"
+		dialer.TLSClientConfig = c.TLSConfig
+	}
+
+	host, port, _ := net.SplitHostPort(c.Host)
+	if (scheme == "ws" && port != "80") || (scheme == "wss" && port != "443") {
+		host = c.Host
+	}
+
+	uri := url.URL{
+		Scheme: scheme,
+		Host:   host,
+		Path:   c.Path,
+	}
+
+	headers := http.Header{}
+	if c.Headers != nil {
+		for k, v := range c.Headers {
+			headers.Set(k, v)
+		}
+	}
+
+	wsConn, resp, err := dialer.Dial(uri.String(), headers)
+	if err != nil {
+		var reason string
+		if resp != nil {
+			reason = resp.Status
+		}
+		return nil, fmt.Errorf("Dial %s error: %s", host, reason)
+	}
+
+	return &websocketConn{
+		conn:       wsConn,
+		remoteAddr: conn.RemoteAddr(),
+	}, nil
 }

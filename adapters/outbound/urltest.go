@@ -1,16 +1,21 @@
 package adapters
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Dreamacro/clash/common/picker"
 	C "github.com/Dreamacro/clash/constant"
 )
 
 type URLTest struct {
-	name     string
+	*Base
 	proxies  []C.Proxy
 	rawURL   string
 	fast     C.Proxy
@@ -26,27 +31,32 @@ type URLTestOption struct {
 	Interval int      `proxy:"interval"`
 }
 
-func (u *URLTest) Name() string {
-	return u.name
-}
-
-func (u *URLTest) Type() C.AdapterType {
-	return C.URLTest
-}
-
 func (u *URLTest) Now() string {
 	return u.fast.Name()
 }
 
-func (u *URLTest) Generator(metadata *C.Metadata) (adapter C.ProxyAdapter, err error) {
-	a, err := u.fast.Generator(metadata)
+func (u *URLTest) Dial(metadata *C.Metadata) (net.Conn, error) {
+	a, err := u.fast.Dial(metadata)
 	if err != nil {
-		go u.speedTest()
+		u.fallback()
 	}
 	return a, err
 }
 
-func (u *URLTest) Close() {
+func (u *URLTest) MarshalJSON() ([]byte, error) {
+	var all []string
+	for _, proxy := range u.proxies {
+		all = append(all, proxy.Name())
+	}
+	sort.Strings(all)
+	return json.Marshal(map[string]interface{}{
+		"type": u.Type().String(),
+		"now":  u.Now(),
+		"all":  all,
+	})
+}
+
+func (u *URLTest) Destroy() {
 	u.done <- struct{}{}
 }
 
@@ -64,8 +74,25 @@ Loop:
 	}
 }
 
+func (u *URLTest) fallback() {
+	fast := u.proxies[0]
+	min := fast.LastDelay()
+	for _, proxy := range u.proxies[1:] {
+		if !proxy.Alive() {
+			continue
+		}
+
+		delay := proxy.LastDelay()
+		if delay < min {
+			fast = proxy
+			min = delay
+		}
+	}
+	u.fast = fast
+}
+
 func (u *URLTest) speedTest() {
-	if atomic.AddInt32(&u.once, 1) != 1 {
+	if !atomic.CompareAndSwapInt32(&u.once, 0, 1) {
 		return
 	}
 	defer atomic.StoreInt32(&u.once, 0)
@@ -73,12 +100,12 @@ func (u *URLTest) speedTest() {
 	wg := sync.WaitGroup{}
 	wg.Add(len(u.proxies))
 	c := make(chan interface{})
-	fast := selectFast(c)
+	fast := picker.SelectFast(context.Background(), c)
 	timer := time.NewTimer(u.interval)
 
 	for _, p := range u.proxies {
 		go func(p C.Proxy) {
-			_, err := DelayTest(p, u.rawURL)
+			_, err := p.URLTest(u.rawURL)
 			if err == nil {
 				c <- p
 			}
@@ -113,7 +140,10 @@ func NewURLTest(option URLTestOption, proxies []C.Proxy) (*URLTest, error) {
 
 	interval := time.Duration(option.Interval) * time.Second
 	urlTest := &URLTest{
-		name:     option.Name,
+		Base: &Base{
+			name: option.Name,
+			tp:   C.URLTest,
+		},
 		proxies:  proxies[:],
 		rawURL:   option.URL,
 		fast:     proxies[0],

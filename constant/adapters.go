@@ -2,6 +2,7 @@ package constant
 
 import (
 	"net"
+	"time"
 )
 
 // Adapter Type
@@ -12,24 +13,36 @@ const (
 	Selector
 	Shadowsocks
 	Socks5
+	Http
 	URLTest
 	Vmess
+	LoadBalance
 )
-
-type ProxyAdapter interface {
-	Conn() net.Conn
-	Close()
-}
 
 type ServerAdapter interface {
 	Metadata() *Metadata
 	Close()
 }
 
-type Proxy interface {
+type ProxyAdapter interface {
 	Name() string
 	Type() AdapterType
-	Generator(metadata *Metadata) (ProxyAdapter, error)
+	Dial(metadata *Metadata) (net.Conn, error)
+	Destroy()
+	MarshalJSON() ([]byte, error)
+}
+
+type DelayHistory struct {
+	Time  time.Time `json:"time"`
+	Delay uint16    `json:"delay"`
+}
+
+type Proxy interface {
+	ProxyAdapter
+	Alive() bool
+	DelayHistory() []DelayHistory
+	LastDelay() uint16
+	URLTest(url string) (uint16, error)
 }
 
 // AdapterType is enum of adapter type
@@ -49,10 +62,14 @@ func (at AdapterType) String() string {
 		return "Shadowsocks"
 	case Socks5:
 		return "Socks5"
+	case Http:
+		return "Http"
 	case URLTest:
 		return "URLTest"
 	case Vmess:
 		return "Vmess"
+	case LoadBalance:
+		return "LoadBalance"
 	default:
 		return "Unknow"
 	}

@@ -1,21 +1,18 @@
 package adapters
 
 import (
+	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
 	C "github.com/Dreamacro/clash/constant"
 )
 
-type proxy struct {
-	RawProxy C.Proxy
-	Valid    bool
-}
-
 type Fallback struct {
-	name     string
-	proxies  []*proxy
+	*Base
+	proxies  []C.Proxy
 	rawURL   string
 	interval time.Duration
 	done     chan struct{}
@@ -28,42 +25,29 @@ type FallbackOption struct {
 	Interval int      `proxy:"interval"`
 }
 
-func (f *Fallback) Name() string {
-	return f.name
-}
-
-func (f *Fallback) Type() C.AdapterType {
-	return C.Fallback
-}
-
 func (f *Fallback) Now() string {
-	_, proxy := f.findNextValidProxy(0)
-	if proxy != nil {
-		return proxy.RawProxy.Name()
-	}
-	return f.proxies[0].RawProxy.Name()
+	proxy := f.findAliveProxy()
+	return proxy.Name()
 }
 
-func (f *Fallback) Generator(metadata *C.Metadata) (adapter C.ProxyAdapter, err error) {
-	idx := 0
-	var proxy *proxy
-	for {
-		idx, proxy = f.findNextValidProxy(idx)
-		if proxy == nil {
-			break
-		}
-		adapter, err = proxy.RawProxy.Generator(metadata)
-		if err != nil {
-			proxy.Valid = false
-			idx++
-			continue
-		}
-		return
-	}
-	return f.proxies[0].RawProxy.Generator(metadata)
+func (f *Fallback) Dial(metadata *C.Metadata) (net.Conn, error) {
+	proxy := f.findAliveProxy()
+	return proxy.Dial(metadata)
 }
 
-func (f *Fallback) Close() {
+func (f *Fallback) MarshalJSON() ([]byte, error) {
+	var all []string
+	for _, proxy := range f.proxies {
+		all = append(all, proxy.Name())
+	}
+	return json.Marshal(map[string]interface{}{
+		"type": f.Type().String(),
+		"now":  f.Now(),
+		"all":  all,
+	})
+}
+
+func (f *Fallback) Destroy() {
 	f.done <- struct{}{}
 }
 
@@ -81,13 +65,13 @@ Loop:
 	}
 }
 
-func (f *Fallback) findNextValidProxy(start int) (int, *proxy) {
-	for i := start; i < len(f.proxies); i++ {
-		if f.proxies[i].Valid {
-			return i, f.proxies[i]
+func (f *Fallback) findAliveProxy() C.Proxy {
+	for _, proxy := range f.proxies {
+		if proxy.Alive() {
+			return proxy
 		}
 	}
-	return -1, nil
+	return f.proxies[0]
 }
 
 func (f *Fallback) validTest() {
@@ -95,9 +79,8 @@ func (f *Fallback) validTest() {
 	wg.Add(len(f.proxies))
 
 	for _, p := range f.proxies {
-		go func(p *proxy) {
-			_, err := DelayTest(p.RawProxy, f.rawURL)
-			p.Valid = err == nil
+		go func(p C.Proxy) {
+			p.URLTest(f.rawURL)
 			wg.Done()
 		}(p)
 	}
@@ -116,17 +99,13 @@ func NewFallback(option FallbackOption, proxies []C.Proxy) (*Fallback, error) {
 	}
 
 	interval := time.Duration(option.Interval) * time.Second
-	warpperProxies := make([]*proxy, len(proxies))
-	for idx := range proxies {
-		warpperProxies[idx] = &proxy{
-			RawProxy: proxies[idx],
-			Valid:    true,
-		}
-	}
 
 	Fallback := &Fallback{
-		name:     option.Name,
-		proxies:  warpperProxies,
+		Base: &Base{
+			name: option.Name,
+			tp:   C.Fallback,
+		},
+		proxies:  proxies,
 		rawURL:   option.URL,
 		interval: interval,
 		done:     make(chan struct{}),

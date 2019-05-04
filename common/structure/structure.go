@@ -1,5 +1,7 @@
 package structure
 
+// references: https://github.com/mitchellh/mapstructure
+
 import (
 	"fmt"
 	"reflect"
@@ -45,11 +47,11 @@ func (d *Decoder) Decode(src map[string]interface{}, dst interface{}) error {
 		}
 
 		value, ok := src[key]
-		if !ok {
+		if !ok || value == nil {
 			if omitempty {
 				continue
 			}
-			return fmt.Errorf("key %s missing", key)
+			return fmt.Errorf("key '%s' missing", key)
 		}
 
 		err := d.decode(key, value, v.Field(idx))
@@ -70,6 +72,10 @@ func (d *Decoder) decode(name string, data interface{}, val reflect.Value) error
 		return d.decodeBool(name, data, val)
 	case reflect.Slice:
 		return d.decodeSlice(name, data, val)
+	case reflect.Map:
+		return d.decodeMap(name, data, val)
+	case reflect.Interface:
+		return d.setInterface(name, data, val)
 	default:
 		return fmt.Errorf("type %s not support", val.Kind().String())
 	}
@@ -108,7 +114,7 @@ func (d *Decoder) decodeString(name string, data interface{}, val reflect.Value)
 		val.SetString(strconv.FormatInt(dataVal.Int(), 10))
 	default:
 		err = fmt.Errorf(
-			"'%s' expected type'%s', got unconvertible type '%s'",
+			"'%s' expected type '%s', got unconvertible type '%s'",
 			name, val.Type(), dataVal.Type(),
 		)
 	}
@@ -125,7 +131,7 @@ func (d *Decoder) decodeBool(name string, data interface{}, val reflect.Value) (
 		val.SetBool(dataVal.Int() != 0)
 	default:
 		err = fmt.Errorf(
-			"'%s' expected type'%s', got unconvertible type '%s'",
+			"'%s' expected type '%s', got unconvertible type '%s'",
 			name, val.Type(), dataVal.Type(),
 		)
 	}
@@ -156,5 +162,78 @@ func (d *Decoder) decodeSlice(name string, data interface{}, val reflect.Value) 
 	}
 
 	val.Set(valSlice)
+	return nil
+}
+
+func (d *Decoder) decodeMap(name string, data interface{}, val reflect.Value) error {
+	valType := val.Type()
+	valKeyType := valType.Key()
+	valElemType := valType.Elem()
+
+	valMap := val
+
+	if valMap.IsNil() {
+		mapType := reflect.MapOf(valKeyType, valElemType)
+		valMap = reflect.MakeMap(mapType)
+	}
+
+	dataVal := reflect.Indirect(reflect.ValueOf(data))
+	if dataVal.Kind() != reflect.Map {
+		return fmt.Errorf("'%s' expected a map, got '%s'", name, dataVal.Kind())
+	}
+
+	return d.decodeMapFromMap(name, dataVal, val, valMap)
+}
+
+func (d *Decoder) decodeMapFromMap(name string, dataVal reflect.Value, val reflect.Value, valMap reflect.Value) error {
+	valType := val.Type()
+	valKeyType := valType.Key()
+	valElemType := valType.Elem()
+
+	errors := make([]string, 0)
+
+	if dataVal.Len() == 0 {
+		if dataVal.IsNil() {
+			if !val.IsNil() {
+				val.Set(dataVal)
+			}
+		} else {
+			val.Set(valMap)
+		}
+
+		return nil
+	}
+
+	for _, k := range dataVal.MapKeys() {
+		fieldName := fmt.Sprintf("%s[%s]", name, k)
+
+		currentKey := reflect.Indirect(reflect.New(valKeyType))
+		if err := d.decode(fieldName, k.Interface(), currentKey); err != nil {
+			errors = append(errors, err.Error())
+			continue
+		}
+
+		v := dataVal.MapIndex(k).Interface()
+		currentVal := reflect.Indirect(reflect.New(valElemType))
+		if err := d.decode(fieldName, v, currentVal); err != nil {
+			errors = append(errors, err.Error())
+			continue
+		}
+
+		valMap.SetMapIndex(currentKey, currentVal)
+	}
+
+	val.Set(valMap)
+
+	if len(errors) > 0 {
+		return fmt.Errorf(strings.Join(errors, ","))
+	}
+
+	return nil
+}
+
+func (d *Decoder) setInterface(name string, data interface{}, val reflect.Value) (err error) {
+	dataVal := reflect.ValueOf(data)
+	val.Set(dataVal)
 	return nil
 }

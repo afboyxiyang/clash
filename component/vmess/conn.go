@@ -35,20 +35,10 @@ type Conn struct {
 	respV       byte
 	security    byte
 
-	sent     bool
 	received bool
 }
 
 func (vc *Conn) Write(b []byte) (int, error) {
-	if vc.sent {
-		return vc.writer.Write(b)
-	}
-
-	if err := vc.sendRequest(); err != nil {
-		return 0, err
-	}
-
-	vc.sent = true
 	return vc.writer.Write(b)
 }
 
@@ -65,11 +55,10 @@ func (vc *Conn) Read(b []byte) (int, error) {
 }
 
 func (vc *Conn) sendRequest() error {
-	timestamp := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestamp, uint64(time.Now().UTC().Unix()))
+	timestamp := time.Now()
 
 	h := hmac.New(md5.New, vc.id.UUID.Bytes())
-	h.Write(timestamp)
+	binary.Write(h, binary.BigEndian, uint64(timestamp.Unix()))
 	_, err := vc.Conn.Write(h.Sum(nil))
 	if err != nil {
 		return err
@@ -111,7 +100,7 @@ func (vc *Conn) sendRequest() error {
 		return err
 	}
 
-	stream := cipher.NewCFBEncrypter(block, hashTimestamp(time.Now().UTC()))
+	stream := cipher.NewCFBEncrypter(block, hashTimestamp(timestamp))
 	stream.XORKeyStream(buf.Bytes(), buf.Bytes())
 	_, err = vc.Conn.Write(buf.Bytes())
 	return err
@@ -145,7 +134,7 @@ func (vc *Conn) recvResponse() error {
 func hashTimestamp(t time.Time) []byte {
 	md5hash := md5.New()
 	ts := make([]byte, 8)
-	binary.BigEndian.PutUint64(ts, uint64(t.UTC().Unix()))
+	binary.BigEndian.PutUint64(ts, uint64(t.Unix()))
 	md5hash.Write(ts)
 	md5hash.Write(ts)
 	md5hash.Write(ts)
@@ -154,7 +143,7 @@ func hashTimestamp(t time.Time) []byte {
 }
 
 // newConn return a Conn instance
-func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security) *Conn {
+func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security) (*Conn, error) {
 	randBytes := make([]byte, 33)
 	rand.Read(randBytes)
 	reqBodyIV := make([]byte, 16)
@@ -197,7 +186,7 @@ func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security) *Conn {
 		reader = newAEADReader(conn, aead, respBodyIV[:])
 	}
 
-	return &Conn{
+	c := &Conn{
 		Conn:        conn,
 		id:          id,
 		dst:         dst,
@@ -210,4 +199,8 @@ func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security) *Conn {
 		writer:      writer,
 		security:    security,
 	}
+	if err := c.sendRequest(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }

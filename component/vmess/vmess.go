@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"net/url"
 	"runtime"
-	"time"
+	"sync"
 
 	"github.com/gofrs/uuid"
-	"github.com/gorilla/websocket"
 )
 
 // Version of vmess
@@ -39,6 +37,11 @@ var CipherMapping = map[string]byte{
 	"chacha20-poly1305": SecurityCHACHA20POLY1305,
 }
 
+var (
+	clientSessionCache tls.ClientSessionCache
+	once               sync.Once
+)
+
 // Command types
 const (
 	CommandTCP byte = 1
@@ -61,76 +64,43 @@ type DstAddr struct {
 
 // Client is vmess connection generator
 type Client struct {
-	user           []*ID
-	uuid           *uuid.UUID
-	security       Security
-	tls            bool
-	host           string
-	websocket      bool
-	websocketPath  string
-	skipCertVerify bool
+	user      []*ID
+	uuid      *uuid.UUID
+	security  Security
+	tls       bool
+	host      string
+	wsConfig  *WebsocketConfig
+	tlsConfig *tls.Config
 }
 
 // Config of vmess
 type Config struct {
-	UUID           string
-	AlterID        uint16
-	Security       string
-	TLS            bool
-	Host           string
-	NetWork        string
-	WebSocketPath  string
-	SkipCertVerify bool
+	UUID             string
+	AlterID          uint16
+	Security         string
+	TLS              bool
+	HostName         string
+	Port             string
+	NetWork          string
+	WebSocketPath    string
+	WebSocketHeaders map[string]string
+	SkipCertVerify   bool
+	SessionCacahe    tls.ClientSessionCache
 }
 
 // New return a Conn with net.Conn and DstAddr
 func (c *Client) New(conn net.Conn, dst *DstAddr) (net.Conn, error) {
+	var err error
 	r := rand.Intn(len(c.user))
-	if c.websocket {
-		dialer := &websocket.Dialer{
-			NetDial: func(network, addr string) (net.Conn, error) {
-				return conn, nil
-			},
-			ReadBufferSize:   4 * 1024,
-			WriteBufferSize:  4 * 1024,
-			HandshakeTimeout: time.Second * 8,
-		}
-		scheme := "ws"
-		if c.tls {
-			scheme = "wss"
-			dialer.TLSClientConfig = &tls.Config{
-				InsecureSkipVerify: c.skipCertVerify,
-			}
-		}
-
-		host, port, err := net.SplitHostPort(c.host)
-		if (scheme == "ws" && port != "80") || (scheme == "wss" && port != "443") {
-			host = c.host
-		}
-
-		uri := url.URL{
-			Scheme: scheme,
-			Host:   host,
-			Path:   c.websocketPath,
-		}
-
-		wsConn, resp, err := dialer.Dial(uri.String(), nil)
+	if c.wsConfig != nil {
+		conn, err = NewWebsocketConn(conn, c.wsConfig)
 		if err != nil {
-			var reason string
-			if resp != nil {
-				reason = resp.Status
-			}
-			println(uri.String(), err.Error())
-			return nil, fmt.Errorf("Dial %s error: %s", host, reason)
+			return nil, err
 		}
-
-		conn = newWebsocketConn(wsConn, conn.RemoteAddr())
 	} else if c.tls {
-		conn = tls.Client(conn, &tls.Config{
-			InsecureSkipVerify: c.skipCertVerify,
-		})
+		conn = tls.Client(conn, c.tlsConfig)
 	}
-	return newConn(conn, c.user[r], dst, c.security), nil
+	return newConn(conn, c.user[r], dst, c.security)
 }
 
 // NewClient return Client instance
@@ -161,13 +131,45 @@ func NewClient(config Config) (*Client, error) {
 		return nil, fmt.Errorf("Unknown network type: %s", config.NetWork)
 	}
 
+	host := net.JoinHostPort(config.HostName, config.Port)
+
+	var tlsConfig *tls.Config
+	if config.TLS {
+		tlsConfig = &tls.Config{
+			ServerName:         config.HostName,
+			InsecureSkipVerify: config.SkipCertVerify,
+			ClientSessionCache: config.SessionCacahe,
+		}
+		if tlsConfig.ClientSessionCache == nil {
+			tlsConfig.ClientSessionCache = getClientSessionCache()
+		}
+	}
+
+	var wsConfig *WebsocketConfig
+	if config.NetWork == "ws" {
+		wsConfig = &WebsocketConfig{
+			Host:      host,
+			Path:      config.WebSocketPath,
+			Headers:   config.WebSocketHeaders,
+			TLS:       config.TLS,
+			TLSConfig: tlsConfig,
+		}
+	}
+
 	return &Client{
-		user:          newAlterIDs(newID(&uid), config.AlterID),
-		uuid:          &uid,
-		security:      security,
-		tls:           config.TLS,
-		host:          config.Host,
-		websocket:     config.NetWork == "ws",
-		websocketPath: config.WebSocketPath,
+		user:      newAlterIDs(newID(&uid), config.AlterID),
+		uuid:      &uid,
+		security:  security,
+		tls:       config.TLS,
+		host:      host,
+		wsConfig:  wsConfig,
+		tlsConfig: tlsConfig,
 	}, nil
+}
+
+func getClientSessionCache() tls.ClientSessionCache {
+	once.Do(func() {
+		clientSessionCache = tls.NewLRUClientSessionCache(128)
+	})
+	return clientSessionCache
 }

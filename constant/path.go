@@ -27,6 +27,7 @@ func init() {
 	} else {
 		homedir = currentUser.HomeDir
 	}
+
 	homedir = P.Join(homedir, ".config", Name)
 	Path = &path{homedir: homedir}
 }

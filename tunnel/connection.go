@@ -5,11 +5,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/adapters/inbound"
-	C "github.com/Dreamacro/clash/constant"
+	adapters "github.com/Dreamacro/clash/adapters/inbound"
 )
 
 const (
@@ -21,12 +21,14 @@ const (
 
 var bufPool = sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}
 
-func (t *Tunnel) handleHTTP(request *adapters.HTTPAdapter, proxy C.ProxyAdapter) {
-	conn := newTrafficTrack(proxy.Conn(), t.traffic)
+func (t *Tunnel) handleHTTP(request *adapters.HTTPAdapter, outbound net.Conn) {
+	conn := newTrafficTrack(outbound, t.traffic)
 	req := request.R
 	host := req.Host
 
 	for {
+		keepAlive := strings.TrimSpace(strings.ToLower(req.Header.Get("Proxy-Connection"))) == "keep-alive"
+
 		req.Header.Set("Connection", "close")
 		req.RequestURI = ""
 		adapters.RemoveHopByHopHeaders(req.Header)
@@ -53,6 +55,10 @@ func (t *Tunnel) handleHTTP(request *adapters.HTTPAdapter, proxy C.ProxyAdapter)
 			break
 		}
 
+		if !keepAlive {
+			break
+		}
+
 		req, err = http.ReadRequest(bufio.NewReader(request.Conn()))
 		if err != nil {
 			break
@@ -66,8 +72,8 @@ func (t *Tunnel) handleHTTP(request *adapters.HTTPAdapter, proxy C.ProxyAdapter)
 	}
 }
 
-func (t *Tunnel) handleSOCKS(request *adapters.SocketAdapter, proxy C.ProxyAdapter) {
-	conn := newTrafficTrack(proxy.Conn(), t.traffic)
+func (t *Tunnel) handleSOCKS(request *adapters.SocketAdapter, outbound net.Conn) {
+	conn := newTrafficTrack(outbound, t.traffic)
 	relay(request.Conn(), conn)
 }
 
